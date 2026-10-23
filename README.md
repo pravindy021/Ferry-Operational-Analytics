@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Ferry Operational Analytics
 
 A Streamlit dashboard for exploring ticket sales and redemptions from ferry
@@ -42,3 +43,7 @@ columns.
   are not known, so gaps are not automatically classified as errors.
 - Anomaly thresholds flag unusual recorded counts, not confirmed operational
   incidents.
+=======
+# Ferry-Operational-Analytics
+Data analytics project for exploring ferry operations, passenger demand, schedules, and operational performance.
+>>>>>>> 2f2694d018301ba26f6a24179971be907e239289
