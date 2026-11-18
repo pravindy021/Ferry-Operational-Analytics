@@ -6,6 +6,7 @@ import re
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 
 from src.data.loader import TARGET_COLUMNS, load_ticket_data, regularize_intervals
@@ -18,6 +19,75 @@ st.set_page_config(
     page_icon="⛴️",
     layout="wide",
 )
+
+THEME_COLORS = {
+    "background": "#F5F7FA",
+    "surface": "#FFFFFF",
+    "text": "#1F2937",
+    "muted": "#64748B",
+    "primary": "#2563EB",
+    "secondary": "#0D9488",
+    "border": "#E2E8F0",
+}
+
+pio.templates["ferry_light"] = pio.templates["plotly_white"]
+pio.templates["ferry_light"].layout.update(
+    paper_bgcolor=THEME_COLORS["background"],
+    plot_bgcolor=THEME_COLORS["surface"],
+    font={
+        "family": "Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+        "color": THEME_COLORS["text"],
+        "size": 12,
+    },
+    title={"font": {"size": 17, "color": THEME_COLORS["text"]}},
+    xaxis={
+        "gridcolor": THEME_COLORS["border"],
+        "linecolor": THEME_COLORS["border"],
+        "zerolinecolor": THEME_COLORS["border"],
+        "tickfont": {"color": THEME_COLORS["muted"]},
+        "title": {"font": {"color": THEME_COLORS["muted"]}},
+    },
+    yaxis={
+        "gridcolor": THEME_COLORS["border"],
+        "linecolor": THEME_COLORS["border"],
+        "zerolinecolor": THEME_COLORS["border"],
+        "tickfont": {"color": THEME_COLORS["muted"]},
+        "title": {"font": {"color": THEME_COLORS["muted"]}},
+    },
+    legend={
+        "bgcolor": "rgba(255,255,255,0.88)",
+        "bordercolor": THEME_COLORS["border"],
+        "borderwidth": 1,
+        "font": {"color": THEME_COLORS["text"]},
+    },
+    hoverlabel={
+        "bgcolor": THEME_COLORS["surface"],
+        "bordercolor": THEME_COLORS["border"],
+        "font": {"color": THEME_COLORS["text"]},
+    },
+)
+px.defaults.template = "ferry_light"
+px.defaults.color_discrete_sequence = [
+    THEME_COLORS["primary"],
+    THEME_COLORS["secondary"],
+    "#7C3AED",
+    "#F59E0B",
+    "#DC2626",
+    THEME_COLORS["muted"],
+]
+px.defaults.color_discrete_map = {
+    "Sales": THEME_COLORS["primary"],
+    "Redemptions": THEME_COLORS["secondary"],
+    "Weekday": THEME_COLORS["primary"],
+    "Weekend": THEME_COLORS["secondary"],
+    "Winter": THEME_COLORS["primary"],
+    "Spring": THEME_COLORS["secondary"],
+    "Summer": "#F59E0B",
+    "Autumn": "#7C3AED",
+    "Typical (sampled)": "#94A3B8",
+    "Elevated (P95+ or IQR)": "#F59E0B",
+    "High (P99+)": "#DC2626",
+}
 
 PROJECT_DIR = Path(__file__).resolve().parent
 SOURCE_FILE = PROJECT_DIR / "data" / "Toronto Island Ferry Ticket Counts(1).csv"
@@ -742,7 +812,7 @@ def render_demand_forecasting(grid, artifact):
             y=forecast["prediction"],
             mode="lines+markers",
             name="Forecast",
-            line={"color": "#087e8b", "width": 3},
+            line={"color": THEME_COLORS["primary"], "width": 3},
             marker={"size": 9},
         )
     )
@@ -750,7 +820,7 @@ def render_demand_forecasting(grid, artifact):
         title=f"{target}: observed demand and short-term forecasts",
         xaxis_title="Timestamp",
         yaxis_title="Tickets per 15-minute interval",
-        template="plotly_white",
+        template="ferry_light",
         hovermode="x unified",
         legend={"orientation": "h", "y": 1.12},
     )
@@ -819,14 +889,14 @@ def render_demand_forecasting(grid, artifact):
                 y=chart_rows["prediction"],
                 mode="lines",
                 name="Predicted",
-                line={"color": "#e07a5f"},
+                line={"color": THEME_COLORS["secondary"]},
             )
         )
         actual_vs_predicted.update_layout(
             title=f"Chronological held-out test — {target}, {HORIZONS[test_horizon]}",
             xaxis_title="Target timestamp",
             yaxis_title="Tickets per interval",
-            template="plotly_white",
+            template="ferry_light",
             hovermode="x unified",
         )
         st.plotly_chart(actual_vs_predicted, width="stretch")
@@ -895,8 +965,8 @@ def render_prediction_intervals(grid, artifact):
                 result["upper_95"],
             ],
             fill="toself",
-            fillcolor="rgba(8, 126, 139, 0.12)",
-            line={"color": "rgba(8, 126, 139, 0)"},
+            fillcolor="rgba(37, 99, 235, 0.12)",
+            line={"color": "rgba(37, 99, 235, 0)"},
             name="95% prediction interval",
             hoverinfo="skip",
         )
@@ -916,8 +986,8 @@ def render_prediction_intervals(grid, artifact):
                 result["upper_80"],
             ],
             fill="toself",
-            fillcolor="rgba(8, 126, 139, 0.24)",
-            line={"color": "rgba(8, 126, 139, 0)"},
+            fillcolor="rgba(37, 99, 235, 0.24)",
+            line={"color": "rgba(37, 99, 235, 0)"},
             name="80% prediction interval",
             hoverinfo="skip",
         )
@@ -928,14 +998,14 @@ def render_prediction_intervals(grid, artifact):
             y=[result["prediction"]],
             mode="markers",
             name="Point forecast",
-            marker={"color": "#087e8b", "size": 11},
+            marker={"color": THEME_COLORS["primary"], "size": 11},
         )
     )
     figure.update_layout(
         title=f"{target}: {HORIZONS[horizon]} forecast range",
         xaxis_title="Timestamp",
         yaxis_title="Tickets per interval",
-        template="plotly_white",
+        template="ferry_light",
         hovermode="x unified",
     )
     st.plotly_chart(figure, width="stretch")
@@ -1157,15 +1227,190 @@ st.caption("Short-term ferry ticket demand forecasting and predictive decision s
 st.markdown(
     """
     <style>
-    .stApp { background-color: #f7f9fc; }
+    :root {
+        --fi-bg: #F5F7FA;
+        --fi-surface: #FFFFFF;
+        --fi-text: #1F2937;
+        --fi-muted: #64748B;
+        --fi-primary: #2563EB;
+        --fi-secondary: #0D9488;
+        --fi-border: #E2E8F0;
+    }
+
+    .stApp,
+    [data-testid="stAppViewContainer"] {
+        background: var(--fi-bg);
+        color: var(--fi-text);
+    }
+    [data-testid="stHeader"] {
+        background: rgba(245, 247, 250, 0.94);
+    }
+    [data-testid="stSidebar"] {
+        background: var(--fi-surface);
+        border-right: 1px solid var(--fi-border);
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        background: var(--fi-surface);
+    }
+
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] strong {
+        color: var(--fi-text);
+    }
+    p, label, [data-testid="stCaptionContainer"],
+    [data-testid="stWidgetLabel"] {
+        color: var(--fi-muted);
+    }
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        color: var(--fi-text);
+    }
+    [data-testid="stCaptionContainer"] p {
+        color: var(--fi-muted);
+    }
+
     [data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #e5eaf0;
-        padding: 14px 16px;
+        background: var(--fi-surface);
+        border: 1px solid var(--fi-border);
+        border-radius: 12px;
+        padding: 16px 18px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    [data-testid="stMetricLabel"] {
+        color: var(--fi-muted);
+        font-size: 0.86rem;
+        font-weight: 600;
+    }
+    [data-testid="stMetricValue"] {
+        color: var(--fi-text);
+        font-size: 1.65rem;
+        font-weight: 700;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stRadio"] label {
+        border-radius: 8px;
+        color: var(--fi-text);
+        padding: 0.42rem 0.62rem;
+        transition: background-color 120ms ease, color 120ms ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+        background: #F1F5F9;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+        background: #EFF6FF;
+        color: #1D4ED8;
+        font-weight: 650;
+    }
+
+    [data-baseweb="select"] > div,
+    [data-baseweb="input"] > div,
+    [data-baseweb="textarea"] > div,
+    [data-testid="stDateInput"] input,
+    [data-testid="stTimeInput"] input {
+        background: var(--fi-surface) !important;
+        border-color: var(--fi-border) !important;
+        color: var(--fi-text) !important;
+    }
+    [data-baseweb="select"] *,
+    [data-baseweb="input"] input,
+    [data-baseweb="textarea"] textarea,
+    [data-testid="stDateInput"] input,
+    [data-testid="stTimeInput"] input {
+        color: var(--fi-text) !important;
+    }
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"],
+    [role="option"] {
+        background: var(--fi-surface) !important;
+        color: var(--fi-text) !important;
+    }
+    [role="option"]:hover,
+    [role="option"][aria-selected="true"] {
+        background: #EFF6FF !important;
+        color: #1D4ED8 !important;
+    }
+
+    .stButton > button,
+    [data-testid="stDownloadButton"] > button {
+        background: var(--fi-primary);
+        border: 1px solid var(--fi-primary);
+        border-radius: 8px;
+        color: #FFFFFF;
+        font-weight: 600;
+        transition: background-color 120ms ease, border-color 120ms ease;
+    }
+    .stButton > button:hover,
+    [data-testid="stDownloadButton"] > button:hover {
+        background: #1D4ED8;
+        border-color: #1D4ED8;
+        color: #FFFFFF;
+    }
+    .stButton > button:focus-visible,
+    [data-testid="stDownloadButton"] > button:focus-visible {
+        outline: 3px solid rgba(37, 99, 235, 0.32);
+        outline-offset: 2px;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        background: var(--fi-surface);
+        border: 1px dashed #CBD5E1;
         border-radius: 10px;
     }
-    [data-testid="stSidebar"] { background-color: #f1f5f9; }
-    h1, h2, h3 { color: #17324d; }
+    [data-testid="stFileUploaderDropzone"] button {
+        background: var(--fi-surface);
+        border: 1px solid var(--fi-border);
+        color: var(--fi-text);
+    }
+
+    [data-testid="stAlert"] {
+        background: #EFF6FF;
+        border: 1px solid #BFDBFE;
+        border-radius: 9px;
+        color: #1E3A8A;
+    }
+    [data-testid="stAlert"] p,
+    [data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
+        color: inherit;
+    }
+    [data-testid="stAlert"][kind="warning"],
+    [data-testid="stAlert"][data-kind="warning"],
+    [data-testid="stAlert"]:has([data-testid*="Warning"]),
+    [data-testid="stAlert"]:has([aria-label*="warning" i]) {
+        background: #FFFBEB;
+        border-color: #FCD34D;
+        color: #78350F;
+    }
+    [data-testid="stAlert"][kind="success"],
+    [data-testid="stAlert"][data-kind="success"],
+    [data-testid="stAlert"]:has([data-testid*="Success"]),
+    [data-testid="stAlert"]:has([aria-label*="success" i]) {
+        background: #ECFDF5;
+        border-color: #6EE7B7;
+        color: #065F46;
+    }
+    [data-testid="stAlert"][kind="error"],
+    [data-testid="stAlert"][data-kind="error"],
+    [data-testid="stAlert"]:has([data-testid*="Error"]),
+    [data-testid="stAlert"]:has([aria-label*="error" i]) {
+        background: #FEF2F2;
+        border-color: #FCA5A5;
+        color: #991B1B;
+    }
+
+    [data-testid="stDataFrame"],
+    [data-testid="stTable"] {
+        background: var(--fi-surface);
+        border: 1px solid var(--fi-border);
+        border-radius: 9px;
+    }
+    @media (max-width: 700px) {
+        [data-testid="stMetric"] {
+            padding: 12px;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.3rem;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
