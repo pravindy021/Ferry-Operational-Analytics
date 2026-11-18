@@ -5,17 +5,22 @@ import re
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
+from src.data.loader import TARGET_COLUMNS, load_ticket_data, regularize_intervals
+from src.models.artifacts import train_or_load
+from src.models.forecasting import HORIZONS, forecast_all_horizons
+from src.prediction.demand_monitor import classify_forecast
+
 st.set_page_config(
-    page_title="Ferry Operational Analytics",
+    page_title="Ferry Intelligence",
     page_icon="⛴️",
     layout="wide",
 )
 
 PROJECT_DIR = Path(__file__).resolve().parent
 SOURCE_FILE = PROJECT_DIR / "data" / "Toronto Island Ferry Ticket Counts(1).csv"
-DEMO_FILE = PROJECT_DIR / "data" / "ferry_analysis_2015_2025.csv"
 SEASONS = {
     12: "Winter",
     1: "Winter",
@@ -116,7 +121,7 @@ def prepare_data(raw_data, mapping):
 
 
 def render_overview(filtered, full_data, start_date, end_date, granularity):
-    st.header("Dashboard overview")
+    st.header("Overview dashboard")
 
     total_sales = filtered["Sales Count"].sum()
     total_redemptions = filtered["Redemption Count"].sum()
@@ -125,48 +130,50 @@ def render_overview(filtered, full_data, start_date, end_date, granularity):
         total_sales / total_redemptions if total_redemptions else None
     )
     highest_row = filtered.loc[filtered["Total Activity Load"].idxmax()]
+    latest = full_data.loc[full_data["Timestamp"].idxmax()]
 
-    metrics = st.columns(3)
+    metrics = st.columns(4)
     metrics[0].metric(
-        "Total Ticket Sales",
+        "Historical ticket sales",
         f"{total_sales:,.0f}",
         help="Sum of recorded ticket sales in the selected date range.",
     )
     metrics[1].metric(
-        "Total Ticket Redemptions",
+        "Historical redemptions",
         f"{total_redemptions:,.0f}",
         help="Sum of recorded ticket redemptions in the selected date range.",
     )
     metrics[2].metric(
-        "Average Activity per Interval",
-        f"{average_activity:,.2f}",
-        help="Average sales plus redemptions per valid recorded observation.",
+        "Latest available timestamp",
+        latest["Timestamp"].strftime("%Y-%m-%d %H:%M"),
+    )
+    metrics[3].metric(
+        "Latest interval activity",
+        f"{latest['Total Activity Load']:,.0f}",
+        help="Sales plus redemptions at the latest recorded timestamp.",
     )
 
     metrics = st.columns(3)
     metrics[0].metric(
+        "Average Activity per Interval",
+        f"{average_activity:,.2f}",
+        help="Average sales plus redemptions per valid recorded observation.",
+    )
+    metrics[1].metric(
         "Total Recorded Intervals",
         f"{len(filtered):,}",
         help="Number of valid recorded observations in the selected date range.",
     )
-    metrics[1].metric(
+    metrics[2].metric(
         "Sales-to-Redemption Ratio",
         f"{sales_redemption_ratio:,.2f}"
         if sales_redemption_ratio is not None
         else "N/A",
         help="Total ticket sales divided by total ticket redemptions.",
     )
-    metrics[2].metric(
-        "Highest Activity Recorded",
-        f"{highest_row['Total Activity Load']:,.0f}",
-        help=(
-            "Highest sales-plus-redemptions total in one recorded observation. "
-            f"Timestamp: {highest_row['Timestamp']}"
-        ),
-    )
     st.caption(
-        "Highest recorded activity occurred at "
-        f"{highest_row['Timestamp']}."
+        f"Highest recorded activity: {highest_row['Total Activity Load']:,.0f} "
+        f"at {highest_row['Timestamp']}."
     )
 
     st.caption(
@@ -176,19 +183,32 @@ def render_overview(filtered, full_data, start_date, end_date, granularity):
 
     st.subheader("Activity at a glance")
     if granularity == "Hourly":
-        period = filtered["Timestamp"].dt.floor("h")
+        recent = filtered.loc[
+            filtered["Timestamp"] >= filtered["Timestamp"].max() - pd.Timedelta(days=90)
+        ]
+        period = recent["Timestamp"].dt.floor("h")
     elif granularity == "Daily":
-        period = filtered["Timestamp"].dt.floor("D")
+        recent = filtered.loc[
+            filtered["Timestamp"] >= filtered["Timestamp"].max() - pd.Timedelta(days=365)
+        ]
+        period = recent["Timestamp"].dt.floor("D")
     else:
-        period = filtered["Timestamp"]
+        recent = filtered.loc[
+            filtered["Timestamp"] >= filtered["Timestamp"].max() - pd.Timedelta(days=14)
+        ]
+        period = recent["Timestamp"]
     timeline = (
-        filtered.assign(Period=period)
+        recent.assign(Period=period)
         .groupby("Period", as_index=False)
         .agg(
             Sales=("Sales Count", "sum"),
             Redemptions=("Redemption Count", "sum"),
             Activity=("Total Activity Load", "sum"),
         )
+    )
+    st.caption(
+        "Trend charts show the trailing 14 days at 15-minute granularity, "
+        "90 days hourly, or 365 days daily; KPI totals use the full selected range."
     )
     st.plotly_chart(
         px.line(
@@ -670,19 +690,508 @@ def render_data_quality(raw, mapping, validation, source_name):
         "service schedules, and seasonal closures are not available here, "
         "so gaps are not automatically treated as errors."
     )
-st.title("Ferry Operational Analytics")
+
+
+@st.cache_resource(show_spinner="Loading the cached forecasting model...")
+def load_forecast_state(dataset_path):
+    data, quality = load_ticket_data(dataset_path)
+    grid = regularize_intervals(data)
+    artifact_path = PROJECT_DIR / "data" / "model_artifacts" / "forecaster.joblib"
+    artifact, trained_now = train_or_load(
+        dataset_path, artifact_path, rolling_folds=3
+    )
+    return grid, artifact, quality, trained_now
+
+
+@st.cache_data(show_spinner=False)
+def cached_forecast_horizons(source_digest, target):
+    grid, artifact, _, _ = load_forecast_state(str(SOURCE_FILE))
+    if artifact["source_digest"] != source_digest:
+        raise ValueError("The forecast artifact does not match the source dataset.")
+    return forecast_all_horizons(artifact, grid, target)
+
+
+def horizon_label(steps):
+    return f"{HORIZONS[steps]} ({steps * 15} min)"
+
+
+def render_demand_forecasting(grid, artifact):
+    st.header("Demand forecasting")
+    st.caption(
+        "Independent direct forecasts for ticket sales and redemptions. "
+        "Forecasts start from the latest observed interval for the selected target."
+    )
+    target = st.selectbox("Forecast target", TARGET_COLUMNS, key="forecast_target")
+    forecast = cached_forecast_horizons(artifact["source_digest"], target)
+    forecast = classify_forecast(forecast, grid[target].dropna())
+
+    chart = go.Figure()
+    history = grid[target].dropna().tail(96)
+    chart.add_trace(
+        go.Scatter(
+            x=history.index,
+            y=history.values,
+            mode="lines",
+            name="Observed (last 24 hours)",
+            line={"color": "#64748b", "width": 2},
+        )
+    )
+    chart.add_trace(
+        go.Scatter(
+            x=forecast["timestamp"],
+            y=forecast["prediction"],
+            mode="lines+markers",
+            name="Forecast",
+            line={"color": "#087e8b", "width": 3},
+            marker={"size": 9},
+        )
+    )
+    chart.update_layout(
+        title=f"{target}: observed demand and short-term forecasts",
+        xaxis_title="Timestamp",
+        yaxis_title="Tickets per 15-minute interval",
+        template="plotly_white",
+        hovermode="x unified",
+        legend={"orientation": "h", "y": 1.12},
+    )
+    st.plotly_chart(chart, width="stretch")
+
+    horizon_columns = st.columns(4)
+    for column, (_, row) in zip(horizon_columns, forecast.iterrows()):
+        column.metric(
+            horizon_label(row["horizon_steps"]),
+            f"{row['prediction']:,.1f}",
+            help=f"Forecast timestamp: {row['timestamp']}",
+        )
+    st.dataframe(
+        forecast[
+            [
+                "horizon",
+                "timestamp",
+                "prediction",
+                "model",
+                "Demand Level",
+                "Spike Warning",
+            ]
+        ].rename(
+            columns={
+                "horizon": "Horizon",
+                "timestamp": "Forecast timestamp",
+                "prediction": "Predicted tickets",
+                "model": "Selected model",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "Demand levels are relative to historical percentiles for this target. "
+        "They are not passenger counts, capacity estimates, or safety limits."
+    )
+
+    st.subheader("Held-out actual vs predicted")
+    test_horizon = st.selectbox(
+        "Test horizon",
+        list(HORIZONS),
+        format_func=horizon_label,
+        key="backtest_horizon",
+    )
+    test = artifact["targets"][target][test_horizon]["test_predictions"]
+    if test.empty:
+        st.info(
+            "No held-out test predictions are available for this target and horizon."
+        )
+    else:
+        chart_rows = test.sort_values("target_time").tail(1500)
+        actual_vs_predicted = go.Figure()
+        actual_vs_predicted.add_trace(
+            go.Scatter(
+                x=chart_rows["target_time"],
+                y=chart_rows["actual"],
+                mode="lines",
+                name="Actual",
+                line={"color": "#64748b"},
+            )
+        )
+        actual_vs_predicted.add_trace(
+            go.Scatter(
+                x=chart_rows["target_time"],
+                y=chart_rows["prediction"],
+                mode="lines",
+                name="Predicted",
+                line={"color": "#e07a5f"},
+            )
+        )
+        actual_vs_predicted.update_layout(
+            title=f"Chronological held-out test — {target}, {HORIZONS[test_horizon]}",
+            xaxis_title="Target timestamp",
+            yaxis_title="Tickets per interval",
+            template="plotly_white",
+            hovermode="x unified",
+        )
+        st.plotly_chart(actual_vs_predicted, width="stretch")
+        st.caption(
+            "The chart shows the latest 1,500 held-out test observations "
+            "for readability; "
+            "model metrics are calculated over the full test partition."
+        )
+
+
+def render_prediction_intervals(grid, artifact):
+    st.header("Prediction intervals")
+    st.caption(
+        "Empirical, horizon-specific validation-residual intervals. "
+        "These bounds are not confidence scores or guaranteed coverage."
+    )
+    target_column, horizon_column = st.columns(2)
+    target = target_column.selectbox(
+        "Forecast target", TARGET_COLUMNS, key="interval_target"
+    )
+    horizon = horizon_column.selectbox(
+        "Forecast horizon",
+        list(HORIZONS),
+        format_func=horizon_label,
+        key="interval_horizon",
+    )
+    result = cached_forecast_horizons(
+        artifact["source_digest"], target
+    ).loc[lambda rows: rows["horizon_steps"].eq(horizon)].iloc[0].to_dict()
+
+    metric_columns = st.columns(5)
+    metric_columns[0].metric("Point forecast", f"{result['prediction']:,.1f}")
+    metric_columns[1].metric("80% lower bound", f"{result['lower_80']:,.1f}")
+    metric_columns[2].metric("80% upper bound", f"{result['upper_80']:,.1f}")
+    metric_columns[3].metric("95% lower bound", f"{result['lower_95']:,.1f}")
+    metric_columns[4].metric("95% upper bound", f"{result['upper_95']:,.1f}")
+    st.write(
+        f"**Forecast time:** {result['timestamp']}  ·  "
+        f"**Model:** `{result['model']}`  ·  "
+        f"**Origin:** {result['origin']}"
+    )
+
+    history = grid[target].dropna().tail(96)
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=history.index,
+            y=history.values,
+            mode="lines",
+            name="Observed (last 24 hours)",
+            line={"color": "#64748b"},
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[
+                result["origin"],
+                result["timestamp"],
+                result["timestamp"],
+                result["origin"],
+            ],
+            y=[
+                result["lower_95"],
+                result["lower_95"],
+                result["upper_95"],
+                result["upper_95"],
+            ],
+            fill="toself",
+            fillcolor="rgba(8, 126, 139, 0.12)",
+            line={"color": "rgba(8, 126, 139, 0)"},
+            name="95% prediction interval",
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[
+                result["origin"],
+                result["timestamp"],
+                result["timestamp"],
+                result["origin"],
+            ],
+            y=[
+                result["lower_80"],
+                result["lower_80"],
+                result["upper_80"],
+                result["upper_80"],
+            ],
+            fill="toself",
+            fillcolor="rgba(8, 126, 139, 0.24)",
+            line={"color": "rgba(8, 126, 139, 0)"},
+            name="80% prediction interval",
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[result["timestamp"]],
+            y=[result["prediction"]],
+            mode="markers",
+            name="Point forecast",
+            marker={"color": "#087e8b", "size": 11},
+        )
+    )
+    figure.update_layout(
+        title=f"{target}: {HORIZONS[horizon]} forecast range",
+        xaxis_title="Timestamp",
+        yaxis_title="Tickets per interval",
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    st.plotly_chart(figure, width="stretch")
+    bounds = pd.DataFrame(
+        [
+            {
+                "Interval": "80%",
+                "Lower bound": result["lower_80"],
+                "Forecast": result["prediction"],
+                "Upper bound": result["upper_80"],
+            },
+            {
+                "Interval": "95%",
+                "Lower bound": result["lower_95"],
+                "Forecast": result["prediction"],
+                "Upper bound": result["upper_95"],
+            },
+        ]
+    )
+    st.dataframe(bounds, width="stretch", hide_index=True)
+    st.caption(
+        "Bounds are computed by adding validation-residual quantiles to the point "
+        "forecast and clipping at zero, using the existing pipeline methodology."
+    )
+
+
+def render_model_performance(artifact):
+    st.header("Model performance")
+    target_column, horizon_column = st.columns(2)
+    target = target_column.selectbox(
+        "Evaluation target", TARGET_COLUMNS, key="performance_target"
+    )
+    horizon = horizon_column.selectbox(
+        "Evaluation horizon",
+        list(HORIZONS),
+        format_func=horizon_label,
+        key="performance_horizon",
+    )
+    item = artifact["targets"][target][horizon]
+    metrics = item["test_metrics"]
+    score_columns = st.columns(3)
+    score_columns[0].metric("Held-out MAE", f"{metrics['MAE']:,.3f} tickets")
+    score_columns[1].metric("Held-out RMSE", f"{metrics['RMSE']:,.3f} tickets")
+    score_columns[2].metric(
+        "Held-out MAPE",
+        f"{metrics['MAPE']:,.2f}%" if pd.notna(metrics["MAPE"]) else "N/A",
+    )
+    st.caption(
+        f"Selected model: **{item['model_name']}** · Validation begins "
+        f"{item['validation_start']} · Held-out test begins {item['test_start']}."
+    )
+    st.info(
+        "Supervised observations are split chronologically 70% train, 15% "
+        "validation, and 15% test. Validation MAE selects a model; test metrics "
+        "are reported only for the later held-out period."
+    )
+
+    validation = pd.DataFrame(item["candidate_metrics"])
+    validation["Selected"] = validation["model"].eq(item["model_name"])
+    st.subheader("Validation model comparison")
+    st.dataframe(
+        validation.rename(
+            columns={
+                "model": "Model",
+                "MAE": "MAE (tickets)",
+                "RMSE": "RMSE (tickets)",
+                "MAPE": "MAPE (%)",
+                "WAPE": "WAPE (%)",
+                "sMAPE": "sMAPE (%)",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "MAPE excludes zero actual values. MAE and RMSE are in tickets per "
+        "interval; "
+        "no accuracy percentage is inferred from these error metrics."
+    )
+
+    rolling = pd.DataFrame(item["rolling_origin_metrics"])
+    st.subheader("Expanding rolling-origin validation")
+    if rolling.empty:
+        st.info("No rolling-origin validation folds are stored in this artifact.")
+    else:
+        st.dataframe(
+            rolling.rename(
+                columns={
+                    "fold": "Fold",
+                    "model": "Model",
+                    "validation_start": "Validation start",
+                    "validation_end": "Validation end",
+                    "MAE": "MAE (tickets)",
+                    "RMSE": "RMSE (tickets)",
+                    "MAPE": "MAPE (%)",
+                    "WAPE": "WAPE (%)",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    evaluation_csv = artifact["evaluation"].to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download complete model evaluation",
+        data=evaluation_csv,
+        file_name="ferry_model_evaluation.csv",
+        mime="text/csv",
+    )
+
+
+def render_operational_insights(grid, artifact):
+    st.header("Operational insights")
+    st.caption(
+        "Use these ticket-demand signals to support monitoring and readiness "
+        "discussions; they do not prescribe capacity, departures, or staffing."
+    )
+    target = st.selectbox(
+        "Demand series", TARGET_COLUMNS, key="insights_target"
+    )
+    observed = grid[target].dropna()
+    forecast = classify_forecast(
+        cached_forecast_horizons(artifact["source_digest"], target), observed
+    )
+    st.subheader("Short-term demand watch")
+    st.dataframe(
+        forecast[
+            [
+                "horizon",
+                "timestamp",
+                "prediction",
+                "Demand Level",
+                "Spike Warning",
+                "Operational Note",
+            ]
+        ].rename(
+            columns={
+                "horizon": "Horizon",
+                "timestamp": "Forecast timestamp",
+                "prediction": "Predicted tickets",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "A spike warning means the forecast is at or above the historical P90 "
+        "for this target; it is a relative threshold, not an incident alert."
+    )
+
+    by_hour = (
+        grid[[target]]
+        .dropna()
+        .assign(Hour=lambda frame: frame.index.hour)
+        .groupby("Hour", as_index=False)[target]
+        .mean()
+    )
+    by_weekday = (
+        grid[[target]]
+        .dropna()
+        .assign(Weekday=lambda frame: frame.index.day_name())
+        .groupby("Weekday", as_index=False)[target]
+        .mean()
+    )
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(
+            px.line(
+                by_hour,
+                x="Hour",
+                y=target,
+                markers=True,
+                title="Historical average by hour",
+                labels={
+                    target: "Tickets per observed interval",
+                    "Hour": "Hour of day",
+                },
+            ),
+            width="stretch",
+        )
+    with right:
+        weekday_order = [
+            "Monday", "Tuesday", "Wednesday", "Thursday",
+            "Friday", "Saturday", "Sunday",
+        ]
+        by_weekday["Weekday"] = pd.Categorical(
+            by_weekday["Weekday"], categories=weekday_order, ordered=True
+        )
+        st.plotly_chart(
+            px.bar(
+                by_weekday.sort_values("Weekday"),
+                x="Weekday",
+                y=target,
+                title="Historical average by weekday",
+                labels={target: "Tickets per observed interval"},
+            ),
+            width="stretch",
+        )
+
+    threshold = observed.quantile(0.95)
+    spikes = (
+        grid.loc[grid[target] >= threshold, [target]]
+        .nlargest(10, target)
+        .rename(columns={target: "Tickets"})
+        .reset_index()
+        .rename(columns={"Timestamp": "Timestamp"})
+    )
+    st.subheader("Historical high-demand observations (P95+)")
+    st.dataframe(spikes, width="stretch", hide_index=True)
+    st.caption(
+        "Consider checking high-demand timestamps against operating records. "
+        "Ticket counts alone do not establish passenger loads or explain why "
+        "demand changed; missing intervals are not treated as zero."
+    )
+
+
+st.title("Ferry Intelligence")
+st.caption("Short-term ferry ticket demand forecasting and predictive decision support")
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #f7f9fc; }
+    [data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e5eaf0;
+        padding: 14px 16px;
+        border-radius: 10px;
+    }
+    [data-testid="stSidebar"] { background-color: #f1f5f9; }
+    h1, h2, h3 { color: #17324d; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.header("Dashboard")
+    st.header("Ferry Intelligence")
     page = st.radio(
         "Navigate",
-        ["Overview", "Trends", "Anomalies", "Data Quality"],
+        [
+            "Overview",
+            "Demand Forecasting",
+            "Prediction Intervals",
+            "Model Performance",
+            "Operational Insights",
+            "Trends",
+            "Anomalies",
+            "Data Quality",
+        ],
         label_visibility="collapsed",
     )
     uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file is not None:
     source_name = uploaded_file.name
+    forecast_source = False
     try:
         raw_data = read_csv_bytes(uploaded_file.getvalue())
     except (
@@ -694,28 +1203,25 @@ if uploaded_file is not None:
         st.error(f"Could not read `{source_name}` as a CSV file: {error}")
         st.stop()
 else:
-    demo_path = SOURCE_FILE if SOURCE_FILE.exists() else DEMO_FILE
-    if not demo_path.exists():
+    if not SOURCE_FILE.exists():
         st.error(
-            "No CSV uploaded and no demo dataset is available. "
-            "Upload a CSV file to start the analysis."
+            f"The required source dataset was not found at `{SOURCE_FILE}`. "
+            "Restore the repository data file or upload a CSV to use the "
+            "historical analytics pages."
         )
         st.stop()
-    source_name = demo_path.name
+    source_name = SOURCE_FILE.name
+    forecast_source = True
     try:
-        raw_data = read_csv_bytes(demo_path.read_bytes())
+        raw_data = read_csv_bytes(SOURCE_FILE.read_bytes())
     except (
         pd.errors.ParserError,
         pd.errors.EmptyDataError,
         UnicodeDecodeError,
         ValueError,
     ) as error:
-        st.error(f"Could not read the demo dataset `{source_name}`: {error}")
+        st.error(f"Could not read the source dataset `{source_name}`: {error}")
         st.stop()
-    st.info(
-        "Showing the Toronto Island Ferry demo dataset. Upload your own CSV "
-        "from the sidebar to analyze another ferry service."
-    )
 
 raw_data.columns = [str(column).strip() for column in raw_data.columns]
 if raw_data.empty:
@@ -800,7 +1306,7 @@ if df.empty:
     st.stop()
 
 st.caption(
-    f"Ticket Activity Analytics | Dataset: {source_name} | "
+    f"Dataset: {source_name} | "
     f"{len(df):,} valid rows"
 )
 if validation["excluded_rows"]:
@@ -841,17 +1347,56 @@ filtered = df.loc[
     (df["Timestamp"].dt.date >= start_date)
     & (df["Timestamp"].dt.date <= end_date)
 ].copy()
-if filtered.empty and page != "Data Quality":
+if filtered.empty and page in {"Overview", "Trends", "Anomalies"}:
     st.warning("No recorded observations were found for the selected dates.")
     st.stop()
 
 if page == "Overview":
     render_overview(filtered, df, start_date, end_date, granularity)
+elif page in {
+    "Demand Forecasting",
+    "Prediction Intervals",
+    "Model Performance",
+    "Operational Insights",
+}:
+    if not forecast_source:
+        st.info(
+            "Forecasting is available for the committed Toronto Island Ferry "
+            "dataset. Uploaded CSV files remain available for historical "
+            "analysis and are not silently substituted into the trained models."
+        )
+    else:
+        try:
+            grid, artifact, quality, trained_now = (
+                load_forecast_state(str(SOURCE_FILE))
+            )
+        except (FileNotFoundError, ImportError, OSError, ValueError) as error:
+            st.error(
+                f"Could not load forecasting data or model artifacts: {error}"
+            )
+            st.stop()
+        st.caption(
+            f"Latest forecast source observation: {artifact['latest_observation']} · "
+            f"{quality['observed_rows']:,} valid observed intervals"
+        )
+        if trained_now:
+            st.warning(
+                "A matching pre-trained model artifact was not available, so the "
+                "existing chronological training pipeline generated one for this dataset."
+            )
+        if page == "Demand Forecasting":
+            render_demand_forecasting(grid, artifact)
+        elif page == "Prediction Intervals":
+            render_prediction_intervals(grid, artifact)
+        elif page == "Model Performance":
+            render_model_performance(artifact)
+        else:
+            render_operational_insights(grid, artifact)
 elif page == "Trends":
     render_trends(filtered)
 elif page == "Anomalies":
     render_anomalies(filtered)
-else:
+elif page == "Data Quality":
     render_data_quality(raw_data, mapping, validation, source_name)
 
 if not filtered.empty:

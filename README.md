@@ -1,77 +1,95 @@
 # Ferry Intelligence
 
-Short-term ticket-demand forecasting and decision support for Toronto Island
-Ferry operations. This extends the existing historical analytics project with
-a reusable forecasting pipeline and a small, framework-neutral browser
-dashboard. The new dashboard uses a Python standard-library HTTP server and
-plain HTML, CSS, and JavaScript; it does not use Streamlit.
+Short-term ferry ticket-demand forecasting and predictive decision support for
+Toronto Island Ferry operations. The Streamlit application combines historical
+analytics with the project's existing forecasting pipeline.
 
-## What it provides
+## Dashboard features
 
-- Independent forecasts for **Sales Count** and **Redemption Count** at 15,
-  30, 60, and 120 minutes.
-- Naive, moving-average, daily/weekly seasonal-naive, linear-regression, and
-  histogram-gradient-boosting candidates.
-- A chronological 70/15/15 train/validation/test strategy, expanding
-  rolling-origin validation, and horizon-wise MAE, RMSE, MAPE, and WAPE.
-- Validation-selected models, untouched test reporting, and validation
-  residual-based 80% and 95% prediction intervals.
-- Historical activity charts, model comparisons, a held-out actual-vs-predicted
-  view, demand-level indicators, and downloadable evaluation results.
-- Explicit data-quality reporting. Missing intervals remain missing; they are
-  not interpolated or converted to zero.
+- **Overview:** historical sales and redemptions, latest available observation,
+  recent activity, and operational KPIs.
+- **Demand Forecasting:** separate direct forecasts for sales and redemptions at
+  15-minute, 30-minute, 1-hour, and 2-hour horizons, with held-out actual-vs-
+  predicted charts.
+- **Prediction Intervals:** horizon-specific 80% and 95% validation-residual
+  bounds and point forecasts.
+- **Model Performance:** MAE, RMSE, MAPE, candidate-model comparisons,
+  chronological validation results, and rolling-origin metrics.
+- **Operational Insights:** relative demand-spike flags, historical demand
+  patterns, and decision-support notes.
+- Historical trends, anomalies, data-quality reporting, CSV upload for
+  historical analysis, and downloadable reports.
+
+Forecasting uses the existing direct-horizon feature engineering and candidate
+models (naive, moving-average, seasonal-naive, linear regression, and histogram
+gradient boosting). Models are selected by chronological validation MAE using
+the existing 70/15/15 train/validation/test split. Missing time intervals remain
+missing; they are not interpolated or converted to zero. Forecasting is enabled
+for the committed Toronto Island Ferry dataset. Uploaded CSVs are for
+historical analysis and are not silently used as model input.
 
 ## Run locally
 
-From the repository root in PowerShell:
+Use Python 3.13 to match the included, pre-trained model artifact. From the
+repository root:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python train_forecaster.py
-python run_dashboard.py
+python -m pip install -r requirements.txt
+streamlit run app.py
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The server binds to
-loopback only. If a matching saved model artifact already exists, training
-reuses it. Pass `--force` to `train_forecaster.py` to retrain, or use
-`--rolling-folds 0` to disable rolling-origin checks. Changing that option
-causes the artifact to be regenerated on the next run.
+The app loads the tracked dataset and cached model at
+`data/model_artifacts/forecaster.joblib`. Streamlit caches loaded data and
+models between reruns and caches generated forecasts. If the artifact is
+absent or does not match the source dataset, the app uses the existing training
+pipeline once and saves a replacement artifact. To generate or refresh it
+explicitly, run:
 
-The source dataset expected by default is
-`data/Toronto Island Ferry Ticket Counts(1).csv`. Forecasting artifacts and
-generated evaluation files are stored under the ignored
-`data/model_artifacts/` directory and are not committed.
+```powershell
+python train_forecaster.py
+```
+
+The source data is `data/Toronto Island Ferry Ticket Counts(1).csv`. Forecast
+artifacts are stored in `data/model_artifacts/`; the trained forecaster is
+included in the repository so Streamlit Community Cloud does not need to
+retrain on startup. Generated evaluation and metadata files remain ignored.
+
+## Deploy to Streamlit Community Cloud
+
+1. Push this repository and its changes to GitHub. Include
+   `data/model_artifacts/forecaster.joblib`; it is a required deployment asset.
+2. Sign in to [Streamlit Community Cloud](https://share.streamlit.io/) and
+   choose **Create app**.
+3. Select `pravindy021/Ferry-Operational-Analytics`, the branch you pushed
+   (usually `main`), and set **Main file path** to `app.py`.
+4. In the app's advanced settings, select **Python 3.13**, then deploy.
+   Community Cloud installs dependencies from `requirements.txt`.
+5. After deployment, open the app and confirm the Overview and Demand
+   Forecasting pages show the committed source data and model results.
+
+No secrets or external services are required. The source CSV and matching
+pre-trained model artifact must both be present in the deployed GitHub branch.
+
+## Forecast interpretation
+
+Prediction intervals are empirical, horizon-specific ranges based on
+validation residuals; they are not confidence scores or guaranteed coverage.
+Demand levels use historical P50/P75/P90 thresholds, not vessel capacity or
+safety limits. The dataset does not contain sailing schedules, passenger
+counts, vessel capacity, weather, or service disruptions. Therefore, the app
+provides monitoring and readiness signals only; it does not recommend exact
+departures, ferry capacity, or passenger loads. Ticket sales and redemptions
+are separate events and must not be interpreted as unique passengers.
 
 ## Validation
 
-Run the focused test suite:
+Run the focused forecasting tests:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
-
-## Forecast interpretation
-
-The dashboard forecasts ticket sales and ticket redemptions separately.
-Prediction intervals are empirical, horizon-specific intervals based on
-validation residuals; they are not model confidence scores or guaranteed
-coverage. Demand levels use historical P50/P75/P90 thresholds, not vessel
-capacity or safety limits. The latest source observation is shown in the
-dashboard so users can judge data freshness.
-
-The dataset does not contain sailing schedules, passenger counts, vessel
-capacity, onboard occupancy, weather, or service disruptions. Therefore, the
-system provides monitoring and readiness signals only; it does not recommend
-exact departures, ferry capacity, or passenger loads. Missing time slots may
-reflect operating schedules or collection gaps; their causes are not known.
-
-## Existing project
-
-The original historical analytics, preprocessing, and EDA files are retained.
-The predictive dashboard is a separate interface so the existing application
-does not need to be rewritten or used to access forecasting.
 
 See [the architecture overview](docs/ARCHITECTURE.md),
 [forecasting methodology](docs/FORECASTING_METHODOLOGY.md), and
